@@ -39,6 +39,7 @@ function set_up(){
 	mkdir -p "$temp_logs_folder/tcc"
 	mkdir -p "$temp_logs_folder/live_collection"
 	mkdir -p "$temp_logs_folder/sysdiagnose"
+	mkdir -p "$temp_logs_folder/persistence"
 }
 
 # Version 2023.7.24-1 - Copyright (c) 2023 Pico Mitchell - MIT License - Full license and help info at https://randomapplications.com/json_extract
@@ -245,15 +246,17 @@ function get_UnifiedLog() {
 
     mkdir -p "$CASE_DIR"
 
-    local filters=(
-        "login:process == \"logind\""
-        "tcc:process == \"tccd\""
-        "ssh:process == \"sshd\""
-        "failed_sudo:process == \"sudo\" and eventMessage CONTAINS \"TTY\" AND eventMessage CONTAINS \"3 incorrect password attempts\""
-        "manual_configuration_profile_install:subsystem == \"com.apple.ManagedClient\" AND process == \"mdmclient\" AND category == \"MDMDaemon\" and eventMessage CONTAINS \"Installed configuration profile:\" AND eventMessage CONTAINS \"Source: Manual\""
-        "screensharing:(process == \"screensharingd\" || process == \"ScreensharingAgent\")"
-        "xprotect_remediator:subsystem == \"com.apple.XProtectFramework.PluginAPI\" && category == \"XPEvent.structured\""
-    )
+  local filters=(
+    "login:process == \"logind\""
+    "tcc:process == \"tccd\""
+    "ssh:process == \"sshd\""
+    "failed_sudo:process == \"sudo\" and eventMessage CONTAINS \"TTY\" AND eventMessage CONTAINS \"3 incorrect password attempts\""
+    "manual_configuration_profile_install:subsystem == \"com.apple.ManagedClient\" AND process == \"mdmclient\" AND category == \"MDMDaemon\" and eventMessage CONTAINS \"Installed configuration profile:\" AND eventMessage CONTAINS \"Source: Manual\""
+    "screensharing:(process == \"screensharingd\" || process == \"ScreensharingAgent\")"
+    "xprotect_remediator:subsystem == \"com.apple.XProtectFramework.PluginAPI\" && category == \"XPEvent.structured\""
+    "tcc_change:eventMessage CONTAINS \"Update Access Record:\""
+)
+
 
     for item in "${filters[@]}"; do
         local name="${item%%:*}"   # Text before colon
@@ -264,8 +267,6 @@ function get_UnifiedLog() {
         $logcmd "$predicate" > "$CASE_DIR/unified_${name}.txt" 2>/dev/null
     done
 }
-
-
 
 function collect_logs() {
 	local CASE_DIR1="$temp_logs_folder/logs/sysmlibrarylogs"
@@ -507,6 +508,80 @@ else
 fi
 }
 
+function persistence() {
+	local plist="/Library/Preferences/com.apple.loginwindow.plist"
+	local CASE_DIR="$temp_logs_folder/persistence"
+	mkdir -p "$CASE_DIR"
+
+	# --- Step 1: Dump SFL bookmarks (BTM file) ---
+	
+	sfltool dumpbtm > "$CASE_DIR/sfltool_btm_dump.txt" 2>/dev/null
+
+	# --- Step 2: Capture CRON jobs ---
+	{
+		echo "--- crontab for root ---"
+		sudo crontab -l 2>/dev/null || echo "No root crontab"
+		echo
+		echo "--- crontab for $loggedInUser ---"
+		crontab -u "$loggedInUser" -l 2>/dev/null || echo "No user crontab"
+		echo
+		echo "--- /etc/crontab ---"
+		cat /etc/crontab 2>/dev/null || echo "No /etc/crontab"
+		echo
+		echo "--- /etc/cron.d/ directory ---"
+		ls -l /etc/cron.d/ 2>/dev/null || echo "No /etc/cron.d/"
+		echo
+		echo "--- /etc/periodic/ directory ---"
+		ls -lR /etc/periodic/ 2>/dev/null || echo "No /etc/periodic/"
+	} > "$CASE_DIR/cron_jobs.txt"
+
+	# --- Step 3: Dump LaunchAgents/LaunchDaemons ---
+	{
+		echo "--- /Library/LaunchDaemons/ ---"
+		ls -l /Library/LaunchDaemons/ 2>/dev/null || echo "No LaunchDaemons found"
+		echo
+		echo "--- /Library/LaunchAgents/ ---"
+		ls -l /Library/LaunchAgents/ 2>/dev/null || echo "No LaunchAgents found"
+		echo
+		echo "--- ~/Library/LaunchAgents/ ---"
+		ls -l "/Users/$loggedInUser/Library/LaunchAgents/" 2>/dev/null || echo "No user LaunchAgents found"
+	} > "$CASE_DIR/launch_items.txt"
+
+	# --- Step 4: Pull loginwindow.plist ---
+	if [[ -f "/Library/Preferences/com.apple.loginwindow.plist" ]]; then
+		plutil -convert xml1 -o - "/Library/Preferences/com.apple.loginwindow.plist" > "$CASE_DIR/loginwindow_plist.xml" 2>/dev/null
+	else
+		echo "Loginwindow.plist not found" > "$CASE_DIR/loginwindow_plist.xml"
+	fi
+
+	# --- DONE ---
+	echo "Persistence hunting complete, output saved to $CASE_DIR"
+
+	if [[ -f "$plist" ]]; then
+        cp "$plist" "$CASE_DIR/loginwindow.plist"
+
+        local login_hook
+        local logout_hook
+
+        login_hook=$(defaults read /Library/Preferences/com.apple.loginwindow LoginHook 2>/dev/null)
+        logout_hook=$(defaults read /Library/Preferences/com.apple.loginwindow LogoutHook 2>/dev/null)
+
+        {
+            if [[ -n "$login_hook" ]]; then
+                echo "LoginHook: $login_hook"
+                [[ -f "$login_hook" ]] && cp "$login_hook" "$CASE_DIR/"
+            fi
+            if [[ -n "$logout_hook" ]]; then
+                echo "LogoutHook: $logout_hook"
+                [[ -f "$logout_hook" ]] && cp "$logout_hook" "$CASE_DIR/"
+            fi
+        } > "$CASE_DIR/hooks.txt"
+    else
+        echo "No loginwindow plist found, skipping login hooks." > "$CASE_DIR/hooks.txt"
+    fi
+}
+
+
 function system_quickref () {
 	local jamf_version=$(jamf -version | grep -o 'version=.*' | awk -F '=' '{print $2}')
 	local uptime=$(bootDate=$(sysctl -n kern.boottime | awk -F'[ ,]' '{print $4}'); calculateUptimeInDays() { local uptimeInSeconds=$1; local secondsInDay=86400; uptimeInDays=$((uptimeInSeconds / secondsInDay)); echo "$uptimeInDays"; }; uptime=$((currentDate - bootDate)); calculateUptimeInDays "$uptime")
@@ -565,14 +640,16 @@ fi
 
 set_up
 
-collect_logs
+persistence
 
-system_quickref
+#collect_logs
 
-collect_browser
+#system_quickref
+
+#collect_browser
 
 system_rc
 
-compress_logs
+#compress_logs
 
 echo "done"
