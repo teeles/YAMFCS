@@ -87,7 +87,6 @@ function grab_path() {
     fi
 }
 
-
 function compress_logs () {
 	
 	local zip_filename="TMFDCT_${host}_${timestamp}.zip"
@@ -97,10 +96,8 @@ function compress_logs () {
 	if [[ -f "$desktop_path/$zip_filename" && -d "$temp_logs_folder" ]]; then
 		write_log "log compression cleared, deleting temp logs"
 		rm -r "$temp_logs_folder"
-		write_log "finished"
 		exit 0
 	else 
-		write_log "Something has gone wrong with the final stage, leaving temp logs for manual compressions"
 		echo "something went wrong, copy $temp_logs_folder manualy"
 		exit 1
 	fi
@@ -242,20 +239,59 @@ if [[ "$(basename "$file")" == "extensions.json" ]]; then
 			
 }
 
+function get_UnifiedLog() {
+    local CASE_DIR="$temp_logs_folder/logs/unified_export"
+    local logcmd="log show --info --backtrace --debug --loss --signpost --predicate"
+
+    mkdir -p "$CASE_DIR"
+
+    local filters=(
+        "login:process == \"logind\""
+        "tcc:process == \"tccd\""
+        "ssh:process == \"sshd\""
+        "failed_sudo:process == \"sudo\" and eventMessage CONTAINS \"TTY\" AND eventMessage CONTAINS \"3 incorrect password attempts\""
+        "manual_configuration_profile_install:subsystem == \"com.apple.ManagedClient\" AND process == \"mdmclient\" AND category == \"MDMDaemon\" and eventMessage CONTAINS \"Installed configuration profile:\" AND eventMessage CONTAINS \"Source: Manual\""
+        "screensharing:(process == \"screensharingd\" || process == \"ScreensharingAgent\")"
+        "xprotect_remediator:subsystem == \"com.apple.XProtectFramework.PluginAPI\" && category == \"XPEvent.structured\""
+    )
+
+    for item in "${filters[@]}"; do
+        local name="${item%%:*}"   # Text before colon
+        local predicate="${item#*:}" # Text after colon
+
+        echo "Collecting unified log for $name..."
+
+        $logcmd "$predicate" > "$CASE_DIR/unified_${name}.txt" 2>/dev/null
+    done
+}
+
+
+
 function collect_logs() {
 	local CASE_DIR1="$temp_logs_folder/logs/sysmlibrarylogs"
 	local CASE_DIR2="$temp_logs_folder/logs/userlibrarylogs"
 	local CASE_DIR3="$temp_logs_folder/logs/varlogs"
 	local CASE_DIR4="$temp_logs_folder/logs/auditlogs"
-	mkdir -p "$CASE_DIR1" "$CASE_DIR2" "$CASE_DIR3" "$CASE_DIR4"
+	local CASE_DIR5="$temp_logs_folder/logs/parsed_audit"
 
+	mkdir -p "$CASE_DIR1" "$CASE_DIR2" "$CASE_DIR3" "$CASE_DIR4" "$CASE_DIR5"
+
+	# Copy original log directories
 	cp -r /Library/Logs "$CASE_DIR1"
-
-	cp -r /Users/$loggedInUser/Library/Logs "$CASE_DIR2"
-
+	cp -r "/Users/$loggedInUser/Library/Logs" "$CASE_DIR2"
 	cp -r /var/log "$CASE_DIR3"
-
 	cp -r /var/audit "$CASE_DIR4"
+
+	# Parse each binary audit file
+	for auditfile in /var/audit/*; do
+		if [[ -f "$auditfile" ]]; then
+			local filename=$(basename "$auditfile")
+			# Convert to readable text
+			praudit "$auditfile" > "$CASE_DIR5/${filename}.txt"
+			# Optional: Convert to XML format
+			# praudit -x "$auditfile" > "$CASE_DIR5/${filename}.xml"
+		fi
+	done
 }
 
 function shellhistory() {
@@ -503,6 +539,7 @@ function collect_browser() {
 function system_rc() {
 
 	collect_logs
+	get_UnifiedLog
 	shellhistory
 	system_profile
 	collect_tcc
@@ -513,11 +550,22 @@ function system_rc() {
 
 #Setup file structure
 
+echo "This is an experamental test version of the script"
+echo "This shoudl not be used in production"
+echo "ctrl+C now... you have been warned"
+echo "10 second sleep"
+
+#sleep 10
+
+echo "Running the test script now"
+
 if [[ "$1" == "--grab" && -n "$2" ]]; then
     grab_path "$2"
 fi
 
 set_up
+
+collect_logs
 
 system_quickref
 
