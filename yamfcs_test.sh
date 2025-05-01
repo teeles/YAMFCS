@@ -12,6 +12,9 @@
 ###############################################
 
 # Define paths
+Script_version=1.0
+versionFromGit=$(curl --silent --fail "https://api.github.com/repos/teeles/YAMFCS/releases/latest" | awk -F '"' "/tag_name/ { print \$4; exit }")
+downloadURL=$(curl --silent --fail "https://api.github.com/repos/teeles/YAMFCS/releases/latest" | awk -F '"' "/zipball_url\"/ { print \$4; exit }")
 temp_logs_folder="/tmp/logs"
 desktop_path="$HOME/Desktop"
 host=$(hostname)
@@ -21,6 +24,41 @@ macOS=$(sw_vers -productVersion)
 serial_number="$(system_profiler SPHardwareDataType | awk '/Serial/ {print $4}')"
 
 #Functions. 
+
+function check_sudo() {
+    if [[ "$EUID" -ne 0 ]]; then
+        echo "This script must be run with sudo."
+        exit 1
+    fi
+}
+
+function yamfcs_update () {
+	mkdir "/tmp/yamfcs_update"
+	curl -L -o "/tmp/yamfcs_update/yamfcs_update.zip" "$downloadURL"
+	unzip -o "/tmp/yamfcs_update/yamfcs_update.zip" -d "/tmp/yamfcs_update"
+	echo "The new version of the script has been downloaded to /tmp/yamfcs_update"
+	echo "copy the new scirpt to a new working directory"
+	echo "CTRL+C this script and launch the new version" 
+}
+
+function version_compare () {
+    local IFS=.
+    local i ver1=($1) ver2=($2)
+
+    # Pad the shorter version with zeros
+    for ((i=${#ver1[@]}; i<3; i++)); do ver1[i]=0; done
+    for ((i=${#ver2[@]}; i<3; i++)); do ver2[i]=0; done
+
+    for ((i=0; i<3; i++)); do
+        if ((10#${ver1[i]} > 10#${ver2[i]})); then
+            return 0  # true: $1 >= $2
+        elif ((10#${ver1[i]} < 10#${ver2[i]})); then
+            return 1  # false: $1 < $2
+        fi
+    done
+
+    return 0  # equal
+}
 
 function write_log() {
     local log="$temp_logs_folder/script_log.log"
@@ -625,14 +663,35 @@ function system_rc() {
 
 #Setup file structure
 
+check_sudo
+
 echo "This is an experamental test version of the script"
 echo "This shoudl not be used in production"
 echo "ctrl+C now... you have been warned"
 echo "10 second sleep"
 
-#sleep 10
+sleep 10
 
 echo "Running the test script now"
+
+if version_compare "$Script_version" "$versionFromGit"; then
+    echo "This script is the latest V:$Script_version"
+else
+    echo "This script is V:$Script_version, a newer V$versionFromGit is available"
+    read -r -p "Would you like to update? [Y/N]: " reply
+    case "$reply" in
+        [Yy]*)
+            echo "Updating..."
+            yamfcs_update
+            sleep 5
+            exit 0
+            ;;
+        *)
+            echo "Skipping update."
+            ;;
+    esac
+fi
+
 
 if [[ "$1" == "--grab" && -n "$2" ]]; then
     grab_path "$2"
@@ -642,14 +701,14 @@ set_up
 
 persistence
 
-#collect_logs
+collect_logs
 
-#system_quickref
+system_quickref
 
-#collect_browser
+collect_browser
 
 system_rc
 
-#compress_logs
+compress_logs
 
 echo "done"
